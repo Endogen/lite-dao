@@ -23,9 +23,8 @@ def seed():
 
     ProposalCount.set(0)
 
-
 @export 
-def create_proposal(title:str, description: str, date_decision: datetime.datetime, choices: list):
+def create_proposal(title: str, description: str, date_decision: datetime.datetime, choices: list):
     assert len(title) > metadata['min_title_length'], 'Title must be more than 10 characters long.'
     assert len(description) > metadata['min_description_length'], 'Description length must be more than 100 characters long.'
     assert date_decision > now,    'the decision date must take place in the future.'
@@ -34,42 +33,37 @@ def create_proposal(title:str, description: str, date_decision: datetime.datetim
     for choice in choices:
         assert len(choice) > 0, 'choice cannot be an empty string.'
 
-    deduct_fee()
+    I.import_module(metadata['fee_currency']).transfer_from(
+        amount=metadata['fee_amount'], 
+        to=metadata['operator'], 
+        main_account=ctx.signer)
 
-    ProposalCount.set(ProposalCount.get() + 1)
-    Proposals[ProposalCount.get()] = {
+    proposal_idx = ProposalCount.get() + 1
+    ProposalCount.set(proposal_idx)
+    
+    Proposals[proposal_idx] = {
         "title":title,
         "description": description,
         "date_decision": date_decision,
         "choices": choices,
         "state": "open"
     }
-
-    proposal_idx = ProposalCount.get()
     
     token_contract_name = metadata['token_contract']
-    if LPWeight[proposal_idx,token_contract_name] is 0:
-         set_lp_token_value(proposal_idx=proposal_idx, token_contract_name=token_contract_name)
+    if LPWeight[proposal_idx, token_contract_name] is 0:
+        set_lp_token_value(proposal_idx, token_contract_name)
     
-    
-
-def deduct_fee():
-    token_contract = I.import_module(metadata['fee_currency'])
-    token_contract.transfer_from(amount=metadata['fee_amount'], to=metadata['operator'], main_account=ctx.signer)
-    
+    return proposal_idx
 
 @export 
-def count_ballots(proposal_idx: int, batch_size: int = None):
-    if batch_size is None: batch_size=100
-
+def count_ballots(proposal_idx: int, batch_size: int = 100):
     '''checks'''
     assert now > Proposals[proposal_idx]["date_decision"], 'It is not possible to count the ballots for this proposal yet'
     assert Proposals[proposal_idx]["state"] is not "concluded", 'The ballots for this proposal have already been counted'
     assert Ballots[proposal_idx, "counted"] is not True, 'this ballot has been counted.'
     '''check if this proposal has a stored lp token weight, if no, calculate how much the LP weight is worth'''
     
-    start_idx = ProcessedBallots[proposal_idx]
-    start_idx += 1
+    start_idx = ProcessedBallots[proposal_idx] + 1
 
     current_ballot_idx = 0
 
@@ -77,11 +71,11 @@ def count_ballots(proposal_idx: int, batch_size: int = None):
     for i in range(0, batch_size):        
         current_ballot_idx = start_idx + i
         
-        voter_vk = Ballots[proposal_idx,"forwards_index", current_ballot_idx,"user_vk"]
+        voter_vk = Ballots[proposal_idx, "forwards_index", current_ballot_idx, "user_vk"]
 
-        ProcessedBallots[proposal_idx, current_ballot_idx, "choice"] = Ballots[proposal_idx,"forwards_index", current_ballot_idx, "choice"]
+        ProcessedBallots[proposal_idx, current_ballot_idx, "choice"] = Ballots[proposal_idx, "forwards_index", current_ballot_idx, "choice"]
         ProcessedBallots[proposal_idx, current_ballot_idx, "user_vk"] = voter_vk
-        ProcessedBallots[proposal_idx, current_ballot_idx, "weight"] = get_vk_weight(vk=voter_vk, proposal_idx=proposal_idx)
+        ProcessedBallots[proposal_idx, current_ballot_idx, "weight"] = get_vk_weight(voter_vk, proposal_idx)
 
         if current_ballot_idx == BallotCount[proposal_idx]:
             # Mark ballot count as ready for verification.
@@ -93,18 +87,14 @@ def count_ballots(proposal_idx: int, batch_size: int = None):
 
     ProcessedBallots[proposal_idx] = current_ballot_idx
 
-
 @export 
-def verify_ballots(proposal_idx: int, batch_size: int = None):
-    if batch_size is None: batch_size=100
-
+def verify_ballots(proposal_idx: int, batch_size: int = 100):
     '''checks'''
     assert Ballots[proposal_idx, "counted"] is True, 'ballots must be counted before verifying them'
     assert Ballots[proposal_idx, "verified"] is not True, 'the ballots for this proposal have already been verified'
     assert Proposals[proposal_idx]["state"] is not "concluded", 'this proposal has been concluded'
 
-    start_idx = VerifiedBallots[proposal_idx]
-    start_idx += 1
+    start_idx = VerifiedBallots[proposal_idx] + 1
 
     current_ballot_idx = 0
 
@@ -115,7 +105,7 @@ def verify_ballots(proposal_idx: int, batch_size: int = None):
         choice = ProcessedBallots[proposal_idx, current_ballot_idx, "choice"]
         processed_weight = ProcessedBallots[proposal_idx, current_ballot_idx, "weight"]
 
-        current_weight = get_vk_weight(vk=voter_vk, proposal_idx=proposal_idx)
+        current_weight = get_vk_weight(voter_vk, proposal_idx)
 
         if current_weight >= processed_weight - (processed_weight * 0.05):
             VerifiedBallots[proposal_idx, choice] += current_weight
@@ -137,75 +127,67 @@ def verify_ballots(proposal_idx: int, batch_size: int = None):
             return 
 
     VerifiedBallots[proposal_idx] = current_ballot_idx
-    
 
 @export 
 def cast_ballot(proposal_idx: int, choice_idx: int): 
     voter = ctx.signer   
-    ballot_idx = BallotCount[proposal_idx]
-    ballot_idx += 1
+    ballot_idx = BallotCount[proposal_idx] + 1
     
     '''checks'''
     assert Proposals[proposal_idx] is not False
     assert choice_idx >= 0 and choice_idx < len(Proposals[proposal_idx]["choices"]), 'you must select a valid choice.'
     assert now < Proposals[proposal_idx]["date_decision"], 'It is too late to cast a ballot for this proposal.'
-    assert Ballots[proposal_idx,"backwards_index", voter] is False, 'you have already cast a ballot !'
+    assert Ballots[proposal_idx, "backwards_index", voter] is False, 'you have already cast a ballot !'
     
     '''record ballot'''
-    Ballots[proposal_idx,"forwards_index",ballot_idx,"choice"] = choice_idx
-    Ballots[proposal_idx,"forwards_index",ballot_idx,"user_vk"] = voter
-    Ballots[proposal_idx,"backwards_index", voter] = ballot_idx
+    Ballots[proposal_idx, "forwards_index", ballot_idx, "choice"] = choice_idx
+    Ballots[proposal_idx, "forwards_index", ballot_idx, "user_vk"] = voter
+    Ballots[proposal_idx, "backwards_index", voter] = ballot_idx
     
-    BallotCount[proposal_idx] += 1
+    BallotCount[proposal_idx] = ballot_idx
 
 @export    
-def get_vk_weight(vk:str, proposal_idx: int):
+def get_vk_weight(vk: str, proposal_idx: int):
     '''
     Get the rswp value of any tokens, vtokens and LP tokens for rswp pairs (staked or not). 
     '''
     token_contract_name = metadata['token_contract']
     user_token_total = 0
 
-    user_token_total += get_token_value(vk=vk, token_contract_name=token_contract_name)
-    user_token_total += get_staked_token_value(vk=vk)
-    user_token_total += get_rocketfuel_value(vk=vk, token_contract_name=token_contract_name)
-    user_token_total += get_lp_value(vk=vk, proposal_idx=proposal_idx, token_contract_name=token_contract_name)
-    user_token_total += get_staked_lp_value(vk=vk, proposal_idx=proposal_idx, token_contract_name=token_contract_name)
+    user_token_total += get_token_value(vk, token_contract_name)
+    user_token_total += get_staked_token_value(vk)
+    user_token_total += get_rocketfuel_value(vk, token_contract_name)
+    user_token_total += get_lp_value(vk, proposal_idx, token_contract_name)
+    user_token_total += get_staked_lp_value(vk, proposal_idx, token_contract_name)
 
     return user_token_total
 
 @export
-def get_token_value(vk:str, token_contract_name:str):
-    balances = ForeignHash(foreign_contract=token_contract_name, foreign_name='balances')
-    token_balance = balances[vk] 
-
-    return token_balance
+def get_token_value(vk: str, token_contract_name: str):
+    return ForeignHash(foreign_contract=token_contract_name, foreign_name='balances')[vk]
 
 @export
 def get_staked_token_value(vk: str):
     '''iterate through v token contracts and get user balance.'''
     vk_balance = 0
-    staking_contract_names = metadata['v_token_contracts']
 
-    for contract in staking_contract_names:
-        balances = ForeignHash(foreign_contract=contract, foreign_name='balances')
-        vk_balance += balances[vk] 
+    for contract in metadata['v_token_contracts']:
+        vk_balance += ForeignHash(foreign_contract=contract, foreign_name='balances')[vk]
 
     return vk_balance
 
 @export    
-def get_rocketfuel_value(vk:str, token_contract_name: str):
+def get_rocketfuel_value(vk: str, token_contract_name: str):
     '''
     get value of RSWP staked in rocket fuel
     '''
     dex_contract_name = metadata['dex_contract']
     dex_staked_amount = ForeignHash(foreign_contract=dex_contract_name, foreign_name='staked_amount')
-    user_rocketfuel = dex_staked_amount[vk, token_contract_name] or 0
     
-    return user_rocketfuel
+    return dex_staked_amount[vk, token_contract_name] or 0
 
 @export
-def get_lp_value(vk:str, proposal_idx:int, token_contract_name: str):
+def get_lp_value(vk: str, proposal_idx:int, token_contract_name: str):
     '''
     get lp value from the dex contract
     '''
@@ -216,8 +198,9 @@ def get_lp_value(vk:str, proposal_idx:int, token_contract_name: str):
     return user_lp * LPWeight[proposal_idx,token_contract_name]
 
 @export
-def get_staked_lp_value(vk: str, proposal_idx: int, token_contract_name:str):
+def get_staked_lp_value(vk: str, proposal_idx: int, token_contract_name: str):
     lp_count = 0
+
     staking_contract_names = metadata['lp_v_token_contracts']
     lp_token_value = LPWeight[proposal_idx,token_contract_name]
 
@@ -240,8 +223,7 @@ def set_lp_token_value(proposal_idx: int, token_contract_name: str):
     total_lp = dex_lp_points[token_contract_name]
     token_per_lp = reserves[1] / total_lp
 
-    LPWeight[proposal_idx,token_contract_name] = token_per_lp * 2
-
+    LPWeight[proposal_idx, token_contract_name] = token_per_lp * 2
 
 def assert_operator():
     assert ctx.caller == metadata['operator'], "You are not the listed operator for this contract."
